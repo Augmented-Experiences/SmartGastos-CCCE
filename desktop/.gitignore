@@ -1,0 +1,18 @@
+# Artefactos de build del backend (PyInstaller)
+backend/build/
+backend/dist/
+
+# Artefactos de Tauri / Rust
+src-tauri/target/
+src-tauri/gen/
+
+# Sidecar generado por build-backend (binario grande, se regenera)
+src-tauri/binaries/*
+!src-tauri/binaries/README.md
+
+# Logs de build (tauri-build.mjs)
+tauri-build.log
+cargo-build.log
+
+# Node
+node_modules/

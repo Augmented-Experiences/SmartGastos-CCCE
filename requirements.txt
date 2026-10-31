@@ -1,0 +1,48 @@
+# ============================================================
+# Pyme Ledger AI — Dependencias Python
+# Paquetes reales de PyPI con versiones fijas y verificadas.
+# El instalador de escritorio usa este conjunto (sin EasyOCR ni torch).
+# ============================================================
+
+# ── Servidor web ─────────────────────────────────────────────
+fastapi==0.162.0
+starlette==1.10.0
+uvicorn==0.30.6
+python-multipart==0.0.32
+
+# ── Validación de datos ──────────────────────────────────────
+pydantic==2.9.2
+pydantic-settings==2.5.2
+
+# ── Base de datos ────────────────────────────────────────────
+sqlalchemy==2.0.35
+
+# ── HTTP ─────────────────────────────────────────────────────
+requests==2.34.2
+httpx==0.27.2
+
+# ── Procesamiento de documentos ──────────────────────────────
+# pypdf: sucesor de PyPDF2 (discontinuado). Misma API PdfReader.
+pypdf==6.21.3
+# Pillow: procesamiento de imágenes. 13.0.0 cierra los CVE 2026 de PSD y parsers.
+Pillow==13.0.0
+# pytesseract: wrapper Python para Tesseract (el binario es opcional)
+pytesseract==0.3.13
+# pdf2image: convierte páginas PDF a imágenes (requiere Poppler, opcional)
+pdf2image==1.17.0
+
+# ── OCR de fotos (sin torch). El instalador usa el mismo conjunto.
+rapidocr==3.3.1
+onnxruntime==1.19.2
+
+# ── Datos y análisis ─────────────────────────────────────────
+pandas==2.2.3
+numpy==1.26.4
+openpyxl==3.1.5
+
+# ── Reportes ─────────────────────────────────────────────────
+reportlab==4.2.5
+
+# ── Utilidades ───────────────────────────────────────────────
+python-dateutil==2.9.0
+python-dotenv==1.2.4

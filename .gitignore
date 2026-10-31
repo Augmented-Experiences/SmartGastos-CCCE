@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.env
+
+# Data
+data/
+data-dev/
+*.db
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Herramientas portables (descargadas por setup.py)
+tools/
+
+# Instaladores generados (Windows/Linux)
+dist/

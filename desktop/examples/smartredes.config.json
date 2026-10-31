@@ -1,0 +1,23 @@
+{
+  "$comment": "Ejemplo de config para SmartRedes (repo ccs-brand-assistant). Copiar como desktop/smartsuite.config.json en ese repo. NOTA: SmartRedes fija DATA_DIR a BASE_DIR/data; aplicar el parche de 1 línea (ver desktop/README.md) para que respete la variable DATA_DIR.",
+  "publisher": "Cámara Colombiana de Comercio Electrónico (CCCE)",
+  "productName": "SmartRedes",
+  "identifier": "co.org.ccce.smartredes",
+  "version": "1.0.0",
+  "dataDirName": "SmartRedes",
+  "accent": "#0FB5A6",
+  "window": { "title": "SmartRedes", "width": 1280, "height": 840, "minWidth": 960, "minHeight": 640 },
+  "shortDescription": "Asistente de marca/redes con IA local (CCCE)",
+  "longDescription": "SmartRedes — asistente de marca y redes con IA local para PYMEs, de la Cámara Colombiana de Comercio Electrónico (CCCE).",
+  "ollama": {
+    "tiers": [
+      { "maxRamGb": 6, "model": "llama3.2:1b" },
+      { "maxRamGb": 12, "model": "llama3.2:3b" },
+      { "maxRamGb": 0, "model": "llama3.1:8b" }
+    ]
+  },
+  "pyinstaller": {
+    "$comment": "El motor de imágenes (diffusers/transformers/torch) y el scraper con navegador (playwright) son opcionales y se excluyen del instalador para mantenerlo liviano; se pueden habilitar aparte.",
+    "excludes": ["torch", "torchvision", "torchaudio", "diffusers", "transformers", "accelerate", "safetensors", "tokenizers", "huggingface_hub", "playwright", "scipy"]
+  }
+}

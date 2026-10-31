@@ -1,0 +1,28 @@
+{
+  "$comment": "Ejemplo de config para SmartGastos (repo pyme-ledger-ai.pinokio). Copiar como desktop/smartsuite.config.json en ese repo. SmartGastos ya respeta la variable DATA_DIR y usa PORT por entorno: no requiere parches.",
+  "publisher": "Cámara Colombiana de Comercio Electrónico (CCCE)",
+  "productName": "SmartGastos",
+  "identifier": "co.org.ccce.smartgastos",
+  "version": "1.1.9",
+  "dataDirName": "SmartGastos",
+  "accent": "#2E9E3F",
+  "window": { "title": "SmartGastos", "width": 1280, "height": 840, "minWidth": 960, "minHeight": 640 },
+  "shortDescription": "Gestión de gastos/contabilidad con IA local (CCCE)",
+  "splashSubtitle": "Preparando tu asistente de gastos y contabilidad con IA local…",
+  "splashLogo": "../app/logo-ccce.png",
+  "longDescription": "SmartGastos — gestión de gastos y contabilidad con IA local para PYMEs, de la Cámara Colombiana de Comercio Electrónico (CCCE).",
+  "ollama": {
+    "tiers": [
+      { "maxRamGb": 7, "id": "liviano", "label": "Liviano", "model": "llama3.2:1b", "extraModels": [] },
+      { "maxRamGb": 13, "id": "estandar", "label": "Estándar", "model": "llama3.2:3b", "extraModels": [] },
+      { "maxRamGb": 24, "id": "completo", "label": "Completo", "model": "llama3.2:3b", "extraModels": ["moondream"] },
+      { "maxRamGb": 0, "id": "maximo", "label": "Máximo", "model": "llama3.1:8b", "extraModels": ["moondream"] }
+    ],
+    "$comment_extra": "moondream solo se baja en perfiles Completo/Máximo (16 GB+). En 8 GB el OCR es RapidOCR y el texto usa llama3.2:3b."
+  },
+  "access": { "blockBelowGb": 7, "warnBelowGb": 13 },
+  "pyinstaller": {
+    "$comment": "EasyOCR/torch se excluyen. RapidOCR necesita OpenCV (cv2) y onnxruntime en el sidecar.",
+    "excludes": ["easyocr", "torch", "torchvision", "scipy", "skimage", "scikit_image", "ninja"]
+  }
+}
