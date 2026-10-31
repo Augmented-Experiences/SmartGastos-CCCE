@@ -31,7 +31,7 @@ const productName = req("productName");
 const version = cfg.version || "1.0.0";
 const identifier = req("identifier");
 const dataDirName = req("dataDirName");
-const accent = cfg.accent || "#2E9E3F";
+const accent = cfg.accent || "#F4C10E";
 
 /** Identificador Rust/npm estable (co.org.ccce.smartgastos → smartgastos). */
 function cargoPackageName() {

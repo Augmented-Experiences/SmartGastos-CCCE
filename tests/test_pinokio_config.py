@@ -135,7 +135,7 @@ class TestUIFiles(unittest.TestCase):
         self.assertEqual(cfg.get("publisher"), "Cámara Colombiana de Comercio Electrónico (CCCE)")
         self.assertEqual(cfg.get("productName"), "SmartGastos")
         self.assertEqual(cfg.get("identifier"), "co.org.ccce.smartgastos")
-        self.assertEqual(cfg.get("accent"), "#2E9E3F")
+        self.assertEqual(cfg.get("accent"), "#F4C10E")
         self.assertEqual(cfg.get("splashLogo"), "../app/logo-ccce.png")
         extra = (cfg.get("ollama") or {}).get("extraModels") or []
         tiers = (cfg.get("ollama") or {}).get("tiers") or []

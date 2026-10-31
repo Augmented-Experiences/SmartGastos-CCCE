@@ -5,7 +5,7 @@
   "identifier": "co.org.ccce.smartgastos",
   "version": "1.1.9",
   "dataDirName": "SmartGastos",
-  "accent": "#2E9E3F",
+  "accent": "#F4C10E",
   "window": { "title": "SmartGastos", "width": 1280, "height": 840, "minWidth": 960, "minHeight": 640 },
   "shortDescription": "Gestión de gastos/contabilidad con IA local (CCCE)",
   "longDescription": "SmartGastos — gestión de gastos y contabilidad con IA local para PYMEs, de la Cámara Colombiana de Comercio Electrónico (CCCE).",
