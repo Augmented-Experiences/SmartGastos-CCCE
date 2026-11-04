@@ -261,6 +261,17 @@ class TestPortableOllama(unittest.TestCase):
         self.assertIn("spawn_serve", self.main)
         self.assertIn("finish_ollama_bootstrap", self.main)
 
+    def test_shared_engine_home_and_per_app_active_model(self):
+        self.assertIn('SUITE_FOLDER: &str = "SmartSuite"', self.ollama)
+        self.assertIn("import_legacy_models", self.main)
+        self.assertIn("migrate.lock", self.ollama)
+        self.assertIn("SmartRedes", self.ollama)
+        self.assertIn("SmartCaja", self.ollama)
+        self.assertIn('home.join("active_model.txt")', self.main)
+        self.assertIn('home.join("active_profile.json")', self.main)
+        self.assertIn("OLLAMA_MODELS=", self.main)
+        self.assertIn("permanece en marcha", self.main)
+
     def test_sidecar_passes_ollama_model_env(self):
         self.assertIn('.env("OLLAMA_MODEL"', self.main)
         self.assertIn("active_model.txt", self.main)

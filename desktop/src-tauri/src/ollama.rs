@@ -1,13 +1,15 @@
-//! Portable in-app Ollama: reuse a healthy system daemon on 11434, otherwise
-//! download the official zip/tgz into the product data dir, start `serve`,
-//! and pull models. Never runs the Windows MSI / system installer.
+//! Portable in-app Ollama shared by SmartGastos, SmartRedes, and SmartCaja.
+//! Reuse a healthy daemon on 11434. Otherwise download the official zip/tgz
+//! into the shared SmartSuite engine home, start `serve` with `OLLAMA_MODELS`
+//! pointed at that home, and pull models. A daemon this process starts stays
+//! up after the window closes. Never runs the Windows system installer.
 
-use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -21,6 +23,11 @@ const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
 pub const DEFAULT_PORT: u16 = 11434;
 const OWNED_PID_FILE: &str = "owned.pid";
+const SUITE_FOLDER: &str = "SmartSuite";
+const LEGACY_APP_DIRS: [&str; 3] = ["SmartGastos", "SmartRedes", "SmartCaja"];
+const MODEL_TREE_DIRS: [&str; 2] = ["blobs", "manifests"];
+/// Same walk the previous per-app finder used (files up to three directories down).
+const BINARY_SEARCH_DEPTH: u8 = 4;
 
 /// Official GitHub release assets (followed via HTTP redirects).
 #[allow(dead_code)]
@@ -40,30 +47,73 @@ pub const WINDOWS_AMD64_ZIP_FALLBACK: &str = "https://ollama.com/download/ollama
 #[allow(dead_code)]
 pub const LINUX_AMD64_TGZ_FALLBACK: &str = "https://ollama.com/download/ollama-linux-amd64.tgz";
 
+/// Per-app state (`active_model.txt`, `active_profile.json`). Not the shared engine.
 pub fn ollama_home(data_dir: &Path) -> PathBuf {
     data_dir.join("ollama")
 }
 
+fn data_base_from_app(app_data_dir: &Path) -> PathBuf {
+    app_data_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| app_data_dir.to_path_buf())
+}
+
+/// Shared engine. `app_data_dir` is only used to find the same base as `user_data_dir()`.
+pub fn engine_home(app_data_dir: &Path) -> PathBuf {
+    data_base_from_app(app_data_dir)
+        .join(SUITE_FOLDER)
+        .join("ollama")
+}
+
 pub fn models_dir(data_dir: &Path) -> PathBuf {
-    ollama_home(data_dir).join("models")
+    engine_home(data_dir).join("models")
 }
 
 fn download_dir(data_dir: &Path) -> PathBuf {
-    ollama_home(data_dir).join("download")
+    engine_home(data_dir).join("download")
 }
 
 fn owned_pid_path(data_dir: &Path) -> PathBuf {
-    ollama_home(data_dir).join(OWNED_PID_FILE)
+    engine_home(data_dir).join(OWNED_PID_FILE)
 }
 
 pub fn record_owned_pid(data_dir: &Path, pid: u32) {
-    let home = ollama_home(data_dir);
+    let home = engine_home(data_dir);
     let _ = fs::create_dir_all(&home);
     let _ = fs::write(owned_pid_path(data_dir), pid.to_string());
 }
 
 pub fn clear_owned_pid(data_dir: &Path) {
     let _ = fs::remove_file(owned_pid_path(data_dir));
+}
+
+fn legacy_engine_homes(app_data_dir: &Path) -> Vec<PathBuf> {
+    let base = data_base_from_app(app_data_dir);
+    let mut homes: Vec<PathBuf> = LEGACY_APP_DIRS
+        .iter()
+        .map(|name| base.join(name).join("ollama"))
+        .collect();
+    let own = ollama_home(app_data_dir);
+    if !homes.iter().any(|home| paths_equal(home, &own)) {
+        homes.push(own);
+    }
+    homes
+}
+
+fn legacy_model_dirs(app_data_dir: &Path) -> Vec<PathBuf> {
+    legacy_engine_homes(app_data_dir)
+        .into_iter()
+        .map(|home| home.join("models"))
+        .collect()
+}
+
+fn paths_equal(a: &Path, b: &Path) -> bool {
+    if let (Ok(left), Ok(right)) = (fs::canonicalize(a), fs::canonicalize(b)) {
+        return left == right;
+    }
+    a.to_string_lossy()
+        .eq_ignore_ascii_case(&b.to_string_lossy())
 }
 
 pub fn api_base(port: u16) -> String {
@@ -147,12 +197,11 @@ pub fn binary_name() -> &'static str {
     }
 }
 
-pub fn find_portable_binary(data_dir: &Path) -> Option<PathBuf> {
-    let home = ollama_home(data_dir);
+fn find_portable_binary(home: &Path) -> Option<PathBuf> {
     if !home.is_dir() {
         return None;
     }
-    find_named(&home, binary_name(), 4)
+    find_named(home, binary_name(), BINARY_SEARCH_DEPTH)
 }
 
 fn find_named(dir: &Path, want: &str, depth: u8) -> Option<PathBuf> {
@@ -165,16 +214,307 @@ fn find_named(dir: &Path, want: &str, depth: u8) -> Option<PathBuf> {
     }
     let rd = fs::read_dir(dir).ok()?;
     for ent in rd.flatten() {
+        let name = ent.file_name();
+        if name == "models" || name == "active_model.txt" {
+            continue;
+        }
         let p = ent.path();
         if p.is_dir() {
             if let Some(found) = find_named(&p, want, depth - 1) {
                 return Some(found);
             }
-        } else if p.file_name().map(|n| n == want).unwrap_or(false) {
+        } else if name == want {
             return Some(p);
         }
     }
     None
+}
+
+enum EngineBinary {
+    Ready(PathBuf),
+    NeedsDownload,
+}
+
+fn prepare_engine(data_dir: &Path, is_running: &dyn Fn(&Path) -> bool) -> EngineBinary {
+    prepare_engine_at(
+        &engine_home(data_dir),
+        &legacy_engine_homes(data_dir),
+        is_running,
+    )
+}
+
+fn prepare_engine_at(
+    engine: &Path,
+    legacy_homes: &[PathBuf],
+    is_running: &dyn Fn(&Path) -> bool,
+) -> EngineBinary {
+    if let Some(bin) = find_portable_binary(engine) {
+        return EngineBinary::Ready(bin);
+    }
+    for legacy in legacy_homes {
+        if let Some(bin) = find_portable_binary(legacy) {
+            if is_running(&bin) {
+                return EngineBinary::Ready(bin);
+            }
+            let _ = move_engine_tree(legacy, engine);
+            if let Some(moved) = find_portable_binary(engine) {
+                return EngineBinary::Ready(moved);
+            }
+            if let Some(still) = find_portable_binary(legacy) {
+                return EngineBinary::Ready(still);
+            }
+        }
+    }
+    EngineBinary::NeedsDownload
+}
+
+fn binary_is_running(path: &Path) -> bool {
+    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut system = sysinfo::System::new();
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::All,
+        true,
+        sysinfo::ProcessRefreshKind::nothing().with_exe(sysinfo::UpdateKind::Always),
+    );
+    system.processes().values().any(|proc| {
+        proc.exe()
+            .map(|exe| same_executable(exe, &target))
+            .unwrap_or(false)
+    })
+}
+
+fn same_executable(exe: &Path, target: &Path) -> bool {
+    if exe == target {
+        return true;
+    }
+    if let Ok(canon) = fs::canonicalize(exe) {
+        if canon == target {
+            return true;
+        }
+    }
+    exe.to_string_lossy()
+        .eq_ignore_ascii_case(&target.to_string_lossy())
+}
+
+fn is_engine_excluded(name: &std::ffi::OsStr) -> bool {
+    matches!(
+        name.to_str(),
+        Some("models" | "active_model.txt" | "active_profile.json" | "owned.pid" | "logs")
+    )
+}
+
+/// Move the legacy engine tree into the shared home. Relative paths stay
+/// (`runtime\ollama.exe` remains `runtime\ollama.exe`). Model blobs and
+/// per-app markers stay where they are.
+fn move_engine_tree(src: &Path, dst: &Path) -> io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for ent in fs::read_dir(src)? {
+        let ent = ent?;
+        if is_engine_excluded(&ent.file_name()) {
+            continue;
+        }
+        let from = ent.path();
+        let to = dst.join(ent.file_name());
+        if from.is_dir() {
+            move_engine_tree(&from, &to)?;
+            let _ = fs::remove_dir(&from);
+            continue;
+        }
+        if to.exists() {
+            continue;
+        }
+        relocate_file(&from, &to)?;
+    }
+    Ok(())
+}
+
+fn relocate_file(from: &Path, to: &Path) -> io::Result<()> {
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    fs::copy(from, to)?;
+    fs::remove_file(from)?;
+    Ok(())
+}
+
+#[derive(Default)]
+struct ImportCounts {
+    moved: u32,
+    deleted_same: u32,
+    left_different: u32,
+    skipped: u32,
+}
+
+/// Import legacy blobs and manifests into the shared models directory.
+/// If another app holds `migrate.lock`, wait and then continue startup.
+pub fn import_legacy_models(app_data_dir: &Path) -> String {
+    let engine = engine_home(app_data_dir);
+    let sources = legacy_model_dirs(app_data_dir);
+    import_model_sources(&engine, &sources, Duration::from_secs(60))
+}
+
+fn import_model_sources(engine: &Path, sources: &[PathBuf], wait: Duration) -> String {
+    let dest = engine.join("models");
+    let Some(_lock) = acquire_migrate_lock(engine, wait) else {
+        return "migrate.lock ocupado; se sigue sin importar".into();
+    };
+    let mut totals = ImportCounts::default();
+    for src in sources {
+        if paths_equal(src, &dest) {
+            continue;
+        }
+        let counts = import_blobs_and_manifests(src, &dest);
+        totals.moved += counts.moved;
+        totals.deleted_same += counts.deleted_same;
+        totals.left_different += counts.left_different;
+        totals.skipped += counts.skipped;
+    }
+    format!(
+        "importados={} duplicados={} distintos={} omitidos={}",
+        totals.moved, totals.deleted_same, totals.left_different, totals.skipped
+    )
+}
+
+fn import_blobs_and_manifests(src_models: &Path, dst_models: &Path) -> ImportCounts {
+    let mut counts = ImportCounts::default();
+    if paths_equal(src_models, dst_models) {
+        return counts;
+    }
+    for sub in MODEL_TREE_DIRS {
+        let src = src_models.join(sub);
+        if src.is_dir() {
+            import_files(&src, &dst_models.join(sub), &mut counts);
+        }
+    }
+    counts
+}
+
+fn import_files(src: &Path, dst: &Path, counts: &mut ImportCounts) {
+    let Ok(rd) = fs::read_dir(src) else {
+        counts.skipped += 1;
+        return;
+    };
+    if fs::create_dir_all(dst).is_err() {
+        counts.skipped += 1;
+        return;
+    }
+    for ent in rd.flatten() {
+        let from = ent.path();
+        let to = dst.join(ent.file_name());
+        if from.is_dir() {
+            import_files(&from, &to, counts);
+            let _ = fs::remove_dir(&from);
+            continue;
+        }
+        if !from.is_file() {
+            continue;
+        }
+        let src_len = match fs::metadata(&from) {
+            Ok(meta) => meta.len(),
+            Err(_) => {
+                counts.skipped += 1;
+                continue;
+            }
+        };
+        match fs::metadata(&to) {
+            Ok(dest_meta) => {
+                if dest_meta.len() == src_len {
+                    match fs::remove_file(&from) {
+                        Ok(()) => counts.deleted_same += 1,
+                        Err(_) => counts.skipped += 1,
+                    }
+                } else {
+                    counts.left_different += 1;
+                }
+            }
+            Err(_) => match move_file_exclusive(&from, &to) {
+                Ok(()) => counts.moved += 1,
+                Err(_) => counts.skipped += 1,
+            },
+        }
+    }
+}
+
+fn move_file_exclusive(from: &Path, to: &Path) -> io::Result<()> {
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    let tmp_name = format!(
+        ".{}.importing",
+        to.file_name().and_then(|n| n.to_str()).unwrap_or("blob")
+    );
+    let tmp = to.with_file_name(tmp_name);
+    let copied = fs::copy(from, &tmp)?;
+    let src_len = fs::metadata(from)?.len();
+    if copied != src_len {
+        let _ = fs::remove_file(&tmp);
+        return Err(io::Error::new(io::ErrorKind::Other, "copia incompleta"));
+    }
+    if fs::rename(&tmp, to).is_err() {
+        let _ = fs::remove_file(&tmp);
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "destino ocupado",
+        ));
+    }
+    let _ = fs::remove_file(from);
+    Ok(())
+}
+
+fn acquire_migrate_lock(home: &Path, wait: Duration) -> Option<File> {
+    let _ = fs::create_dir_all(home);
+    let path = home.join("migrate.lock");
+    let deadline = Instant::now() + wait;
+    loop {
+        match open_exclusive(&path) {
+            Ok(file) => return Some(file),
+            Err(_) => {
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+}
+
+fn open_exclusive(path: &Path) -> io::Result<File> {
+    let mut opts = OpenOptions::new();
+    opts.read(true).write(true).create(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        opts.share_mode(0);
+    }
+    let file = opts.open(path)?;
+    #[cfg(unix)]
+    {
+        if !flock_exclusive(&file) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "migrate.lock ocupado",
+            ));
+        }
+    }
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn flock_exclusive(file: &File) -> bool {
+    extern "C" {
+        fn flock(fd: i32, op: i32) -> i32;
+    }
+    const LOCK_EX: i32 = 2;
+    const LOCK_NB: i32 = 4;
+    use std::os::unix::io::AsRawFd;
+    let fd = file.as_raw_fd();
+    unsafe { flock(fd, LOCK_EX | LOCK_NB) == 0 }
 }
 
 struct ArchiveSpec {
@@ -244,8 +584,12 @@ pub fn ensure_portable_binary(
     data_dir: &Path,
     mut progress: impl FnMut(i32, &str),
 ) -> Result<PathBuf, String> {
-    if let Some(existing) = find_portable_binary(data_dir) {
-        return Ok(existing);
+    match prepare_engine(data_dir, &binary_is_running) {
+        EngineBinary::Ready(existing) => {
+            ensure_executable(&existing);
+            return Ok(existing);
+        }
+        EngineBinary::NeedsDownload => {}
     }
     let spec = archive_for_host()?;
     let dl = download_dir(data_dir);
@@ -269,14 +613,14 @@ pub fn ensure_portable_binary(
         return Err(format!("No se pudo descargar Ollama ({})", last_err));
     }
     progress(0, "Extrayendo Ollama...");
-    let home = ollama_home(data_dir);
+    let home = engine_home(data_dir);
     fs::create_dir_all(&home).map_err(|e| e.to_string())?;
     match spec.kind {
         ArchiveKind::Zip => extract_zip(&archive_path, &home, &mut progress)?,
         ArchiveKind::Tgz => extract_tgz(&archive_path, &home, &mut progress)?,
     }
     let _ = fs::remove_file(&archive_path);
-    let bin = find_portable_binary(data_dir).ok_or_else(|| {
+    let bin = find_portable_binary(&home).ok_or_else(|| {
         format!(
             "El archivo se extrajo en {} pero no aparece {}",
             home.display(),
@@ -495,6 +839,9 @@ fn extract_tgz(
     Ok(())
 }
 
+/// Start `ollama serve`. `models` is the shared SmartSuite models directory.
+/// The same `OLLAMA_MODELS` value is set for a portable binary and for an
+/// `ollama` already on `PATH`.
 pub fn spawn_serve(bin: &Path, port: u16, models: &Path) -> io::Result<Child> {
     let _ = fs::create_dir_all(models);
     let host = format!("127.0.0.1:{}", port);
@@ -608,6 +955,17 @@ pub fn kill_owned_child(child: &mut Child) {
     let _ = child.wait();
 }
 
+fn tags_body_has_model(body: &str, model: &str) -> bool {
+    let needle = format!("\"name\":\"{}\"", model);
+    let needle_sp = format!("\"name\": \"{}\"", model);
+    body.contains(&needle) || body.contains(&needle_sp)
+}
+
+/// `true` when `/api/tags` already lists `model`, so `pull_model` must not POST.
+fn pull_suppressed_by_tags(body: &str, model: &str) -> bool {
+    tags_body_has_model(body, model)
+}
+
 pub fn model_is_present(port: u16, model: &str) -> bool {
     let url = format!("{}/api/tags", api_base(port));
     let Ok(resp) = ureq::AgentBuilder::new()
@@ -621,9 +979,7 @@ pub fn model_is_present(port: u16, model: &str) -> bool {
     let Ok(body) = resp.into_string() else {
         return false;
     };
-    let needle = format!("\"name\":\"{}\"", model);
-    let needle_sp = format!("\"name\": \"{}\"", model);
-    body.contains(&needle) || body.contains(&needle_sp)
+    pull_suppressed_by_tags(&body, model)
 }
 
 pub fn pull_model(port: u16, model: &str, mut progress: impl FnMut(i32, &str)) -> bool {
@@ -677,4 +1033,229 @@ pub fn pull_model(port: u16, model: &str, mut progress: impl FnMut(i32, &str)) -
         }
     }
     ok
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(label: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "sg-ollama-{label}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            ));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn engine_home_is_smartsuite_and_active_model_stays_under_app_data() {
+        let base = PathBuf::from("roaming-base");
+        let app = base.join("SmartGastos");
+        let engine = engine_home(&app);
+        assert_eq!(engine, base.join("SmartSuite").join("ollama"));
+        let marker = ollama_home(&app).join("active_model.txt");
+        assert_eq!(marker, app.join("ollama").join("active_model.txt"));
+        assert!(marker.starts_with(&app));
+        assert!(!marker.starts_with(&engine));
+        assert_eq!(owned_pid_path(&app), engine.join("owned.pid"));
+        assert_eq!(models_dir(&app), engine.join("models"));
+        assert_eq!(legacy_engine_homes(&app).len(), 3);
+        let profile = ollama_home(&app).join("active_profile.json");
+        assert_eq!(profile, app.join("ollama").join("active_profile.json"));
+    }
+
+    #[test]
+    fn legacy_ollama_exe_suppresses_zip_download() {
+        let scratch = Scratch::new("legacy");
+        let legacy = scratch.0.join("SmartGastos").join("ollama");
+        let runtime = legacy.join("runtime");
+        fs::create_dir_all(runtime.join("lib")).unwrap();
+        fs::write(runtime.join(binary_name()), b"engine").unwrap();
+        fs::write(runtime.join("lib").join("ollama.dll"), b"dll").unwrap();
+        fs::create_dir_all(legacy.join("models").join("blobs")).unwrap();
+        fs::write(legacy.join("models").join("blobs").join("sha256-abc"), b"blob").unwrap();
+        fs::write(legacy.join("models").join(binary_name()), b"not-the-binary").unwrap();
+        fs::write(legacy.join("active_model.txt"), b"llama3.2:3b").unwrap();
+        fs::write(legacy.join("active_profile.json"), b"{}").unwrap();
+        fs::write(legacy.join("owned.pid"), b"99").unwrap();
+        fs::create_dir_all(legacy.join("logs")).unwrap();
+        fs::write(legacy.join("logs").join("ollama.log"), b"old").unwrap();
+
+        let engine = scratch.0.join("SmartSuite").join("ollama");
+        match prepare_engine_at(&engine, &[legacy.clone()], &|_| false) {
+            EngineBinary::Ready(path) => {
+                assert_eq!(path, engine.join("runtime").join(binary_name()));
+            }
+            EngineBinary::NeedsDownload => {
+                panic!("un ollama.exe legado no debe pedir el zip");
+            }
+        }
+        assert_eq!(
+            fs::read(engine.join("runtime").join(binary_name())).unwrap(),
+            b"engine"
+        );
+        assert_eq!(
+            fs::read(engine.join("runtime").join("lib").join("ollama.dll")).unwrap(),
+            b"dll"
+        );
+        assert!(!runtime.join(binary_name()).is_file());
+        assert_eq!(fs::read(legacy.join("active_model.txt")).unwrap(), b"llama3.2:3b");
+        assert!(legacy.join("active_profile.json").is_file());
+        assert_eq!(fs::read(legacy.join("owned.pid")).unwrap(), b"99");
+        assert_eq!(
+            fs::read(legacy.join("logs").join("ollama.log")).unwrap(),
+            b"old"
+        );
+        assert_eq!(
+            fs::read(legacy.join("models").join("blobs").join("sha256-abc")).unwrap(),
+            b"blob"
+        );
+        assert_eq!(
+            fs::read(legacy.join("models").join(binary_name())).unwrap(),
+            b"not-the-binary"
+        );
+        assert!(!engine.join("active_model.txt").exists());
+        assert!(!engine.join("owned.pid").exists());
+        assert!(!engine.join("models").exists());
+    }
+
+    #[test]
+    fn running_legacy_binary_is_used_in_place_without_download() {
+        let scratch = Scratch::new("running");
+        let legacy = scratch.0.join("SmartRedes").join("ollama");
+        let exe = legacy.join("runtime").join(binary_name());
+        fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        fs::write(&exe, b"live").unwrap();
+        let engine = scratch.0.join("SmartSuite").join("ollama");
+        match prepare_engine_at(&engine, &[legacy], &|_| true) {
+            EngineBinary::Ready(path) => assert_eq!(path, exe),
+            EngineBinary::NeedsDownload => panic!("un binario en ejecucion no debe pedir el zip"),
+        }
+        assert!(exe.is_file());
+        assert!(!engine.join("runtime").join(binary_name()).exists());
+    }
+
+    #[test]
+    fn binary_inside_models_does_not_count_as_engine() {
+        let scratch = Scratch::new("models-bin");
+        let legacy = scratch.0.join("SmartCaja").join("ollama");
+        fs::create_dir_all(legacy.join("models")).unwrap();
+        fs::write(legacy.join("models").join(binary_name()), b"nope").unwrap();
+        fs::write(legacy.join("active_model.txt"), b"llama").unwrap();
+        let engine = scratch.0.join("SmartSuite").join("ollama");
+        assert!(matches!(
+            prepare_engine_at(&engine, &[legacy], &|_| false),
+            EngineBinary::NeedsDownload
+        ));
+    }
+
+    #[test]
+    fn shared_binary_suppresses_zip_and_leaves_legacy() {
+        let scratch = Scratch::new("shared");
+        let engine = scratch.0.join("SmartSuite").join("ollama");
+        fs::create_dir_all(&engine).unwrap();
+        let exe = engine.join(binary_name());
+        fs::write(&exe, b"shared").unwrap();
+        let legacy = scratch.0.join("SmartGastos").join("ollama");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join(binary_name()), b"legacy").unwrap();
+        match prepare_engine_at(&engine, &[legacy.clone()], &|_| false) {
+            EngineBinary::Ready(path) => assert_eq!(path, exe),
+            EngineBinary::NeedsDownload => panic!("el binario compartido no debe pedir el zip"),
+        }
+        assert_eq!(fs::read(legacy.join(binary_name())).unwrap(), b"legacy");
+    }
+
+    #[test]
+    fn import_moves_blobs_and_respects_existing_size() {
+        let scratch = Scratch::new("import");
+        let src = scratch.0.join("SmartGastos").join("ollama").join("models");
+        let engine = scratch.0.join("SmartSuite").join("ollama");
+        let dst = engine.join("models");
+        fs::create_dir_all(src.join("blobs")).unwrap();
+        fs::create_dir_all(src.join("manifests").join("library").join("llama")).unwrap();
+        fs::write(src.join("blobs").join("sha-new"), b"abcdef").unwrap();
+        fs::write(src.join("blobs").join("sha-same"), b"same").unwrap();
+        fs::write(src.join("blobs").join("sha-diff"), b"short").unwrap();
+        fs::write(
+            src.join("manifests").join("library").join("llama").join("3b"),
+            b"manifest",
+        )
+        .unwrap();
+        fs::create_dir_all(dst.join("blobs")).unwrap();
+        fs::write(dst.join("blobs").join("sha-same"), b"same").unwrap();
+        fs::write(dst.join("blobs").join("sha-diff"), b"different-size").unwrap();
+
+        let note = import_model_sources(&engine, &[src.clone()], Duration::from_secs(2));
+        assert!(note.contains("importados=2"), "{note}");
+        assert!(note.contains("duplicados=1"), "{note}");
+        assert!(note.contains("distintos=1"), "{note}");
+        assert!(!src.join("blobs").join("sha-new").exists());
+        assert_eq!(fs::read(dst.join("blobs").join("sha-new")).unwrap(), b"abcdef");
+        assert!(!src.join("blobs").join("sha-same").exists());
+        assert_eq!(fs::read(dst.join("blobs").join("sha-same")).unwrap(), b"same");
+        assert_eq!(fs::read(src.join("blobs").join("sha-diff")).unwrap(), b"short");
+        assert_eq!(
+            fs::read(dst.join("blobs").join("sha-diff")).unwrap(),
+            b"different-size"
+        );
+        assert_eq!(
+            fs::read(dst.join("manifests").join("library").join("llama").join("3b")).unwrap(),
+            b"manifest"
+        );
+    }
+
+    #[test]
+    fn migrate_lock_is_exclusive_then_released() {
+        let scratch = Scratch::new("lock");
+        let engine = scratch.0.join("engine");
+        let first = acquire_migrate_lock(&engine, Duration::from_secs(0)).expect("primer lock");
+        assert!(engine.join("migrate.lock").is_file());
+        assert!(acquire_migrate_lock(&engine, Duration::from_millis(300)).is_none());
+        drop(first);
+        assert!(acquire_migrate_lock(&engine, Duration::from_secs(2)).is_some());
+    }
+
+    #[test]
+    fn tag_already_in_api_tags_suppresses_pull() {
+        let body = r#"{"models":[{"name":"llama3.2:3b"},{"name": "moondream"}]}"#;
+        assert!(pull_suppressed_by_tags(body, "llama3.2:3b"));
+        assert!(pull_suppressed_by_tags(body, "moondream"));
+        assert!(!pull_suppressed_by_tags(body, "llama3.1:8b"));
+    }
+
+    #[test]
+    fn other_app_model_dir_is_also_a_source() {
+        let base = PathBuf::from("roaming-base");
+        let app = base.join("OtherApp");
+        let dirs = legacy_model_dirs(&app);
+        assert!(dirs.iter().any(|p| p.ends_with(
+            Path::new("SmartGastos").join("ollama").join("models")
+        )));
+        assert!(dirs.iter().any(|p| p.ends_with(
+            Path::new("SmartRedes").join("ollama").join("models")
+        )));
+        assert!(dirs.iter().any(|p| p.ends_with(
+            Path::new("SmartCaja").join("ollama").join("models")
+        )));
+        assert!(dirs.iter().any(|p| p.ends_with(
+            Path::new("OtherApp").join("ollama").join("models")
+        )));
+    }
 }

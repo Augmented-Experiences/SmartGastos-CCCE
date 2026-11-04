@@ -79,7 +79,8 @@ fn app_config() -> &'static AppConfig {
 }
 
 struct BackendState(Mutex<Option<CommandChild>>);
-/// Solo contiene el proceso `ollama serve` lanzado por esta instancia.
+/// `ollama serve` lanzado por esta instancia. Al cerrar la ventana se suelta
+/// sin matarlo: el motor compartido queda para SmartRedes y SmartCaja.
 struct OllamaState(Mutex<Option<Child>>);
 struct ShutdownState(AtomicBool);
 struct BootstrapStarted(Mutex<Instant>);
@@ -394,6 +395,8 @@ fn kill_backend_child(app: &tauri::AppHandle, port: Option<u16>) -> bool {
     }
 }
 
+/// Solo para reemplazar un `serve` duplicado de esta misma instancia.
+/// Cerrar la ventana no debe llamarla: el daemon compartido sigue en marcha.
 fn stop_ollama_child_registered(
     app: &tauri::AppHandle,
     mut child: Child,
@@ -418,28 +421,23 @@ fn stop_ollama_child_registered(
     stopped
 }
 
-fn kill_ollama_child(app: &tauri::AppHandle, port: Option<u16>) -> bool {
+fn detach_shared_ollama_child(child: Child) {
+    let pid = child.id();
+    ollama_log(&format!(
+        "Ollama compartido permanece en marcha (pid={}); la ventana no lo cierra",
+        pid
+    ));
+    drop(child);
+}
+
+fn detach_shared_ollama(app: &tauri::AppHandle) {
     let child = {
         let state = app.state::<OllamaState>();
         let mut slot = state.0.lock().unwrap();
-        let child = slot.take();
-        if let Some(child) = child.as_ref() {
-            register_shutdown_target(
-                app,
-                ShutdownTarget {
-                    label: "kill_ollama_child",
-                    pid: child.id(),
-                    port,
-                    clear_owned_pid: true,
-                },
-            );
-        }
-        child
+        slot.take()
     };
     if let Some(child) = child {
-        stop_ollama_child_registered(app, child, port)
-    } else {
-        true
+        detach_shared_ollama_child(child);
     }
 }
 
@@ -461,11 +459,15 @@ fn shutdown_app(app: &tauri::AppHandle, reason: &str) -> bool {
     let backend_port = app.try_state::<BackendPort>().map(|port| port.0);
     let ollama_port = app.try_state::<OllamaListenPort>().map(|port| port.0);
     let backend_stopped = kill_backend_child(app, backend_port);
-    let ollama_stopped = kill_ollama_child(app, ollama_port);
+    detach_shared_ollama(app);
+    ollama_log(&format!(
+        "shutdown_app: Ollama compartido sigue disponible en el puerto {:?}",
+        ollama_port
+    ));
     let pending_stopped = wait_for_pending_shutdown(app);
-    let stopped = backend_stopped && ollama_stopped && pending_stopped;
+    let stopped = backend_stopped && pending_stopped;
     if stopped {
-        ollama_log("shutdown_app: procesos propios terminados y puertos liberados");
+        ollama_log("shutdown_app: backend terminado; Ollama compartido permanece en marcha");
     } else {
         ollama_log(
             "WARNING shutdown_app: timeout parcial; se cierra la ventana de todos modos",
@@ -754,6 +756,7 @@ fn blocked_ram_message(gb: f64) -> String {
 }
 
 fn persist_active_profile(profile: &Tier) {
+    // Estado de esta app. El motor y los modelos viven en SmartSuite/ollama.
     let home = ollama::ollama_home(&user_data_dir());
     let _ = std::fs::create_dir_all(&home);
     let _ = std::fs::write(home.join("active_model.txt"), &profile.model);
@@ -785,17 +788,9 @@ fn take_owned_slot(app: &tauri::AppHandle, child: Child, port: u16) -> bool {
     let ollama_state = app.state::<OllamaState>();
     let mut slot = ollama_state.0.lock().unwrap();
     if shutdown_requested(app) {
-        register_shutdown_target(
-            app,
-            ShutdownTarget {
-                label: "kill_ollama_child",
-                pid,
-                port: Some(port),
-                clear_owned_pid: true,
-            },
-        );
+        ollama::record_owned_pid(&user_data_dir(), pid);
         drop(slot);
-        stop_ollama_child_registered(app, child, Some(port));
+        detach_shared_ollama_child(child);
         return false;
     }
     if let Some(previous) = slot.take() {
@@ -812,17 +807,9 @@ fn take_owned_slot(app: &tauri::AppHandle, child: Child, port: u16) -> bool {
         stop_ollama_child_registered(app, previous, Some(port));
         slot = ollama_state.0.lock().unwrap();
         if shutdown_requested(app) {
-            register_shutdown_target(
-                app,
-                ShutdownTarget {
-                    label: "kill_ollama_child",
-                    pid,
-                    port: Some(port),
-                    clear_owned_pid: true,
-                },
-            );
+            ollama::record_owned_pid(&user_data_dir(), pid);
             drop(slot);
-            stop_ollama_child_registered(app, child, Some(port));
+            detach_shared_ollama_child(child);
             return false;
         }
     }
@@ -908,6 +895,12 @@ fn bootstrap_ollama(
         status_progress(&app, "ollama", -1, "Verificando el motor de IA (Ollama)...");
 
         let data_dir = user_data_dir();
+        let imported = ollama::import_legacy_models(&data_dir);
+        ollama_log(&format!(
+            "Importacion de modelos hacia {}: {}",
+            ollama::models_dir(&data_dir).display(),
+            imported
+        ));
         if already_healthy {
             ollama_log(&format!(
                 "Usando Ollama ya en marcha en {} (no se registra PID propio)",
@@ -932,8 +925,9 @@ fn bootstrap_ollama(
                         );
                     } else {
                         status_progress(&app, "start", -1, "Iniciando el servicio de IA...");
-                        match ollama::spawn_serve(&bin, ollama_port, &ollama::models_dir(&data_dir))
-                        {
+                        let models = ollama::models_dir(&data_dir);
+                        ollama_log(&format!("OLLAMA_MODELS={}", models.display()));
+                        match ollama::spawn_serve(&bin, ollama_port, &models) {
                             Ok(child) => {
                                 if !take_owned_slot(&app, child, ollama_port) {
                                     return;
