@@ -188,7 +188,7 @@ class AuditorAgent:
             })
         
         # Moneda debe ser código válido
-        moneda = document.get("moneda", "CLP")
+        moneda = document.get("moneda", "COP")
         if not self._validate_currency_code(moneda):
             exceptions.append({
                 "type": "MONEDA_INVÁLIDA",

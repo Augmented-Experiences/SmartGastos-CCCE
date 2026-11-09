@@ -1794,16 +1794,16 @@ a:hover { text-decoration: underline; }
 
       <div class="form-row">
         <div class="form-group" style="position:relative">
-          <label class="form-label">NIT</label>
+          <label class="form-label" id="empRutLabel">NIT</label>
           <input class="form-input" id="empRut" placeholder="900.123.456-7"
             oninput="onEmpRutInput(this.value)"
-            onfocus="setEmpAssist('Ingresa el NIT de tu empresa. En Colombia usa el formato 900.123.456-7, con dígito de verificación.')"/>
+            onfocus="setEmpAssist(empTaxIdAssist())"/>
           <div id="empRutStatus" style="position:absolute;right:10px;top:32px;font-size:16px"></div>
         </div>
         <div class="form-group">
           <label class="form-label">País</label>
           <select class="form-select" id="empPais" onchange="onEmpPaisChange(this.value)"
-            onfocus="setEmpAssist('Selecciona el país donde opera tu empresa. Esto determina el formato del NIT y la moneda predeterminada.')">
+            onfocus="setEmpAssist('Selecciona el país donde opera tu empresa. Esto determina el formato del identificador fiscal y la moneda predeterminada.')">
             <option value="Colombia" selected>Colombia</option>
             <option value="Chile">Chile</option>
             <option value="Peru">Perú</option>
@@ -5538,9 +5538,83 @@ function setEmpAssist(msg) {
   if (el) el.innerHTML = safeHtml(msg);
 }
 
+const EMP_COUNTRY_DEFAULTS = {
+  Colombia: {
+    moneda: 'COP',
+    monedaLabel: 'COP — Peso colombiano',
+    taxLabel: 'NIT',
+    placeholder: '900.123.456-7',
+    assist: 'Ingresa el NIT de tu empresa. En Colombia usa el formato 900.123.456-7, con dígito de verificación.',
+  },
+  Chile: {
+    moneda: 'CLP',
+    monedaLabel: 'CLP — Peso chileno',
+    taxLabel: 'RUT',
+    placeholder: '77.194.706-9',
+    assist: 'Ingresa el RUT de tu empresa. En Chile usa el formato 77.194.706-9.',
+  },
+  Peru: {
+    moneda: 'PEN',
+    monedaLabel: 'PEN — Sol peruano',
+    taxLabel: 'RUC',
+    placeholder: '20123456789',
+    assist: 'Ingresa el RUC de tu empresa (11 dígitos).',
+  },
+  Mexico: {
+    moneda: 'MXN',
+    monedaLabel: 'MXN — Peso mexicano',
+    taxLabel: 'RFC',
+    placeholder: 'ABC123456XYZ',
+    assist: 'Ingresa el RFC de tu empresa.',
+  },
+  Argentina: {
+    moneda: 'ARS',
+    monedaLabel: 'ARS — Peso argentino',
+    taxLabel: 'CUIT',
+    placeholder: '30-12345678-9',
+    assist: 'Ingresa el CUIT de tu empresa.',
+  },
+};
+
+function empTaxIdAssist() {
+  const pais = document.getElementById('empPais')?.value || 'Colombia';
+  return (EMP_COUNTRY_DEFAULTS[pais] || EMP_COUNTRY_DEFAULTS.Colombia).assist;
+}
+
+function ensureEmpMonedaOption(code, label) {
+  const moneda = document.getElementById('empMoneda');
+  if (!moneda || !code) return;
+  let opt = [...moneda.options].find(o => o.value === code);
+  if (!opt) {
+    opt = document.createElement('option');
+    opt.value = code;
+    opt.textContent = label || code;
+    moneda.insertBefore(opt, moneda.firstChild);
+  }
+  opt.selected = true;
+}
+
+function resetEmpresaModalDefaults() {
+  const razon = document.getElementById('empRazonSocial');
+  const rut = document.getElementById('empRut');
+  const giro = document.getElementById('empGiro');
+  const status = document.getElementById('empRutStatus');
+  const sug = document.getElementById('empGiroSuggestions');
+  if (razon) razon.value = '';
+  if (rut) rut.value = '';
+  if (giro) giro.value = '';
+  if (status) status.textContent = '';
+  if (sug) sug.style.display = 'none';
+  const pais = document.getElementById('empPais');
+  if (pais) pais.value = 'Colombia';
+  onEmpPaisChange('Colombia');
+  setEmpAssist('Completa los datos de tu empresa. Por defecto usamos Colombia, NIT y peso colombiano (COP).');
+}
+
 function onEmpRazonSocialInput(val) {
   if (val.length > 3) {
-    setEmpAssist(`Bien! <strong>${escHtml(val)}</strong> — ahora ingresa el NIT de tu empresa para que el agente pueda identificarla en los documentos.`);
+    const label = (EMP_COUNTRY_DEFAULTS[document.getElementById('empPais')?.value] || EMP_COUNTRY_DEFAULTS.Colombia).taxLabel;
+    setEmpAssist(`Bien! <strong>${escHtml(val)}</strong> — ahora ingresa el ${label} de tu empresa para que el agente pueda identificarla en los documentos.`);
   }
 }
 
@@ -5622,15 +5696,18 @@ function onEmpRutInput(val) {
 }
 
 function onEmpPaisChange(pais) {
-  const moneda = document.getElementById('empMoneda');
+  const cfg = EMP_COUNTRY_DEFAULTS[pais] || EMP_COUNTRY_DEFAULTS.Colombia;
   const rutInput = document.getElementById('empRut');
-  const map = { 'Colombia':'COP','Chile':'CLP','Peru':'PEN','Mexico':'MXN','Argentina':'ARS' };
-  if (moneda && map[pais]) {
-    for (let opt of moneda.options) if (opt.value === map[pais]) { opt.selected = true; break; }
+  const rutLabel = document.getElementById('empRutLabel');
+  const status = document.getElementById('empRutStatus');
+  ensureEmpMonedaOption(cfg.moneda, cfg.monedaLabel);
+  if (rutLabel) rutLabel.textContent = cfg.taxLabel;
+  if (rutInput) {
+    rutInput.placeholder = cfg.placeholder;
+    if (rutInput.value) onEmpRutInput(rutInput.value);
   }
-  const placeholders = { 'Chile':'77.194.706-9','Peru':'20123456789','Mexico':'ABC123456XYZ','Colombia':'900123456-7','Argentina':'30-12345678-9' };
-  if (rutInput && placeholders[pais]) rutInput.placeholder = placeholders[pais];
-  setEmpAssist(`País: <strong>${pais}</strong>. La moneda base se actualizó automáticamente. Ingresa el identificador fiscal de tu empresa.`);
+  if (status && !rutInput?.value) status.textContent = '';
+  setEmpAssist(`País: <strong>${escHtml(pais)}</strong>. Moneda base: <strong>${escHtml(cfg.moneda)}</strong>. ${cfg.assist}`);
 }
 
 function onEmpGiroInput(val) {
@@ -5664,9 +5741,9 @@ async function createEmpresa() {
       body: JSON.stringify({
         razon_social: razon,
         rut: document.getElementById('empRut').value.trim() || '000.000.000-0',
-        pais: document.getElementById('empPais').value,
+        pais: document.getElementById('empPais').value || 'Colombia',
         giro: document.getElementById('empGiro').value.trim(),
-        moneda_base: document.getElementById('empMoneda').value,
+        moneda_base: document.getElementById('empMoneda').value || 'COP',
       })
     });
     const d = await r.json();
@@ -5756,7 +5833,10 @@ async function exportData(formato = 'xlsx') {
 // ═══════════════════════════════════════════════════════════════
 // UTILIDADES
 // ═══════════════════════════════════════════════════════════════
-function openModal(id) { document.getElementById(id).classList.add('open'); }
+function openModal(id) {
+  if (id === 'empresaModal') resetEmpresaModalDefaults();
+  document.getElementById(id).classList.add('open');
+}
 function closeModal(id) {
   document.getElementById(id)?.classList.remove('open');
   // Al cerrar el modal de documento, recargar el grid y el dashboard

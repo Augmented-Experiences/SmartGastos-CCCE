@@ -266,7 +266,7 @@ class DocumentProcessingPipeline:
             monto_neto=fields.get("monto_neto"),
             iva=fields.get("iva"),
             monto_total=fields.get("monto_total"),
-            moneda=fields.get("moneda", "CLP"),
+            moneda=fields.get("moneda", "COP"),
             categoria_id=categoria_id,
             categoria_sugerida=classification.get("categoria_sugerida"),
             confianza_clasificacion=classification.get("confianza", 0.0),

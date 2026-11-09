@@ -239,7 +239,7 @@ def _extract_fields_from_thinking(thinking_text: str) -> Dict:
             r'(BOLETA DE VENTA|FACTURA|BOLETA|RECIBO)',
         ],
         "moneda": [
-            r'`?moneda`?[:\s]+["\']?(CLP|PEN|MXN|USD|ARS)["\']?',
+            r'`?moneda`?[:\s]+["\']?(COP|CLP|PEN|MXN|USD|EUR|ARS)["\']?',
         ],
         "descripcion": [
             r'`?descripcion`?[:\s]+["\']?([\w\s]+)["\']?',

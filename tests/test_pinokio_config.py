@@ -148,6 +148,28 @@ class TestUIFiles(unittest.TestCase):
         self.assertEqual(access.get("blockBelowGb"), 7)
         self.assertEqual(access.get("warnBelowGb"), 13)
 
+    def test_empresa_modal_defaults_to_colombia_nit_cop(self):
+        index = (REPO_ROOT / "app" / "index.html").read_text(encoding="utf-8")
+        modal_start = index.find('id="empresaModal"')
+        self.assertGreater(modal_start, 0)
+        modal_end = index.find('id="empresaModal"', modal_start + 1)
+        modal = index[modal_start: modal_end if modal_end > modal_start else modal_start + 6000]
+        if 'Crear Empresa' in index[modal_start:]:
+            modal = index[modal_start: index.find('Crear Empresa', modal_start) + 80]
+        self.assertIn('id="empRutLabel">NIT</label>', modal)
+        self.assertIn('placeholder="900.123.456-7"', modal)
+        self.assertIn('<option value="Colombia" selected>Colombia</option>', modal)
+        self.assertIn('value="COP" selected', modal)
+        self.assertIn('Peso colombiano', modal)
+        self.assertNotIn("RUT / RUC", modal)
+        self.assertNotIn("SII", modal)
+        self.assertNotIn('placeholder="77.194.706-9"', modal)
+        self.assertIn("EMP_COUNTRY_DEFAULTS", index)
+        self.assertIn("ensureEmpMonedaOption", index)
+        self.assertIn("resetEmpresaModalDefaults", index)
+        self.assertIn("placeholder: '900.123.456-7'", index)
+        self.assertNotIn("placeholder: '900123456-7'", index)
+
     def test_feedback_v2_tour_nav_and_new_company_flow(self):
         index = (REPO_ROOT / "app" / "index.html").read_text(encoding="utf-8")
         i_asist = index.find('data-s="asistente-inicial"')
